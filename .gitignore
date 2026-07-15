@@ -23,3 +23,27 @@ scratch_*.txt
 
 # Claude Code 本機工具設定（跟專案程式碼無關，各人機器不同）
 .claude/
+
+# 本機下載的模型權重（數 GB～數十 GB，不進版控；main.py 只用 breeze_asr_model/、m2m100_1.2B/，
+# 從 Hugging Face 下載，其餘為比較測試用、已不使用）
+Taiwan-Tongues-ASR-CE/breeze_asr_model/
+Taiwan-Tongues-ASR-CE/m2m100_1.2B/
+Taiwan-Tongues-ASR-CE/nutn_taiwanese_model/
+Taiwan-Tongues-ASR-CE/models_fresh_verify/
+Taiwan-Tongues-ASR-CE/models/
+Taiwan-Tongues-ASR-CE/model_for_finetune/
+
+# 本機測試音檔/語料/暫時腳本與結果（開發期驗證用，非服務必要，體積大）
+Taiwan-Tongues-ASR-CE/cer_bench_nan/
+Taiwan-Tongues-ASR-CE/cer_bench_zhtw/
+Taiwan-Tongues-ASR-CE/ey_psa_audio/
+Taiwan-Tongues-ASR-CE/moe_taigi_test_audio/
+Taiwan-Tongues-ASR-CE/test_audio/
+Taiwan-Tongues-ASR-CE/test_corpus_raw/
+Taiwan-Tongues-ASR-CE/sample_corpus/
+Taiwan-Tongues-ASR-CE/_*.py
+Taiwan-Tongues-ASR-CE/*_results.json
+Taiwan-Tongues-ASR-CE/*_results_*.json
+Taiwan-Tongues-ASR-CE/*.log
+Taiwan-Tongues-ASR-CE/breeze_10sample_timing.json
+Taiwan-Tongues-ASR-CE/taigi_keyword_candidates.json
