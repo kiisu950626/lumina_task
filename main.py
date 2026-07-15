@@ -1,0 +1,416 @@
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import torch
+from transformers import pipeline, M2M100ForConditionalGeneration, M2M100Tokenizer
+import os
+import shutil
+import sys
+import sqlite3
+from datetime import datetime, timezone
+import librosa
+from langdetect import detect, DetectorFactory
+import os
+import json
+
+# 取得 main.py 所在的當前目錄 (C:\VoiceTranslateApp)
+base_dir = os.path.dirname(os.path.abspath(__file__))
+
+# 加上 Taiwan-Tongues-ASR-CE 這一層，完整對齊你的資料夾結構
+json_path = os.path.join(base_dir, "Taiwan-Tongues-ASR-CE", "api", "keywords.json")
+care_intents_path = os.path.join(base_dir, "Taiwan-Tongues-ASR-CE", "api", "care_intents.json")
+
+with open(json_path, "r", encoding="utf-8") as f:
+    KEYWORDS = json.load(f)
+with open(care_intents_path, "r", encoding="utf-8") as f:
+    CARE_INTENTS = json.load(f)
+DetectorFactory.seed = 0 # 確保偵測穩定
+
+# 掛上 api/ai_translator.py（Gemini 空耳/語意正規化模組）。
+# ASR 對台語/客語辨識失敗時常吐出「音對字不對」的空耳亂碼（例如把「膝蓋痛」
+# 辨識成「咖逃呼很痛」），若不修正就直接丟給翻譯模型，翻出來的東西也會跟著錯。
+# ai_translator.py 用 Gemini 把這種亂碼先正規化成語意正確的標準中文再繼續。
+sys.path.append(os.path.join(base_dir, "Taiwan-Tongues-ASR-CE", "api"))
+from ai_translator import get_ai_analysis
+
+if not os.getenv("GEMINI_API_KEY"):
+    print("⚠️ [警告] 未偵測到 GEMINI_API_KEY（應設定於 Taiwan-Tongues-ASR-CE/api/.env），"
+          "AI 空耳正規化步驟會被跳過，直接使用原始 ASR 文字。")
+
+# --- 文字紀錄（SQLite）---
+# 之前每次語音處理完就直接回傳、不留痕跡，事後沒辦法查「長者今天說了什麼」。
+# 用 SQLite 是跟著這個專案其他地方的做法走（api/file_asr.py、auth_api.py 都是
+# 用 SQLite 存任務/帳號資料），不用另外架資料庫服務。
+RECORDS_DB_PATH = os.path.join(base_dir, "care_records.db")
+
+
+def _ensure_records_schema():
+    os.makedirs(os.path.dirname(RECORDS_DB_PATH) or ".", exist_ok=True)
+    with sqlite3.connect(RECORDS_DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS care_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                audio_filename TEXT,
+                detected_lang TEXT,
+                raw_text TEXT,
+                normalized_text TEXT,
+                matched_known_intent TEXT,
+                predicted_intent TEXT,
+                confidence REAL,
+                event_type TEXT,
+                severity_level TEXT,
+                notify_family INTEGER,
+                vietnamese_output TEXT,
+                indonesian_output TEXT
+            )
+            """
+        )
+        conn.commit()
+
+
+def save_care_record(**fields):
+    # 存紀錄失敗不該讓整個語音處理流程掛掉（跟其他步驟一樣採「失敗就跳過」原則），
+    # 只印警告，不拋例外。
+    try:
+        with sqlite3.connect(RECORDS_DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO care_records (
+                    created_at, audio_filename, detected_lang, raw_text, normalized_text,
+                    matched_known_intent, predicted_intent, confidence, event_type,
+                    severity_level, notify_family, vietnamese_output, indonesian_output
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    fields.get("audio_filename"),
+                    fields.get("detected_lang"),
+                    fields.get("raw_text"),
+                    fields.get("normalized_text"),
+                    fields.get("matched_known_intent"),
+                    fields.get("predicted_intent"),
+                    fields.get("confidence"),
+                    fields.get("event_type"),
+                    fields.get("severity_level"),
+                    int(bool(fields.get("notify_family"))),
+                    fields.get("vietnamese_output"),
+                    fields.get("indonesian_output"),
+                ),
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"⚠️ [紀錄寫入失敗，不影響本次回應]: {e}")
+
+
+_ensure_records_schema()
+
+app = FastAPI(title="CuraGo 護家通 - 數發部規格多語偵測與真 AI 語意分析/翻譯完全體")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+UPLOAD_DIR = "./temp_audio"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+device = 0 if torch.cuda.is_available() else -1
+device_str = "cuda" if torch.cuda.is_available() else "cpu"
+
+print("==================================================")
+print("🚀【🔥 競賽級核心啟動】正在載入全實體 ASR + NLU + NMT 翻譯大腦...")
+print("==================================================")
+
+print("[大腦 1/3] 正在載入 Breeze-ASR-26 台語 ASR 模型 (MediaTek Research)...")
+
+# 換掉原本的 adi-gov-tw CTranslate2 模型：用官方標準測試集實測過，adi-gov-tw 在
+# 播音員唸稿等「清晰語音」情境下平均 CER 64.5%，Breeze-ASR-26（10,000小時訓練資料，
+# Apache 2.0）同條件下只有 37.0%，4 支測試音檔全部勝出，換模型有實測數據支撐。
+# Breeze 只有 transformers/safetensors 格式（沒有 CTranslate2 版本），所以這裡改用
+# transformers.pipeline，不能沿用 faster_whisper.WhisperModel。
+asr_models_path = os.path.join(base_dir, "Taiwan-Tongues-ASR-CE", "breeze_asr_model")
+asr_device_index = 0 if torch.cuda.is_available() else -1
+asr_pipeline = pipeline(
+    "automatic-speech-recognition",
+    model=asr_models_path,
+    device=asr_device_index,
+)
+
+print(f"✅ Breeze-ASR-26 模型載入成功！(device={'cuda' if asr_device_index == 0 else 'cpu'})")
+
+# 🧠 大腦二：真．零樣本語意分類模型 (Zero-Shot)
+# hfl/chinese-bert-wwm-ext 只是一般 MLM 預訓練模型，沒有 NLI (entailment) 頭；
+# zero-shot-classification pipeline 需要 NLI 微調過的模型才能給出有意義的分數，
+# 用一般 BERT 等同亂猜。改用支援中文的多語 NLI 模型。
+print("[大腦 2/3] 載入自然語言語意分析 NLU 模型...")
+classifier = pipeline(
+    "zero-shot-classification",
+    model="MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
+    device=device,
+)
+
+# 🧠 大腦三：真．AI 多語言動態翻譯模型 (Facebook M2M100)
+# 從 418M 換成 1.2B：同系列、同樣 MIT 授權（可商用），實測 20 句自由句子
+# 正確率從 20%/25%（越南文/印尼文）提升到 50%/40%，且已加上生成長度限制
+# （見 ai_translate()）避免偶發的重複生成迴圈拖慢速度。
+print("[大腦 3/3] 載入 Facebook M2M100-1.2B 實體動態翻譯模型 (支援中/印/越)...")
+translation_model_name = os.path.join(base_dir, "Taiwan-Tongues-ASR-CE", "m2m100_1.2B")
+tokenizer = M2M100Tokenizer.from_pretrained(translation_model_name)
+translation_model = M2M100ForConditionalGeneration.from_pretrained(translation_model_name).to(device_str)
+
+print("🎉 [系統完全就緒] 語音偵測、自由語意分析、真 AI 實體動態翻譯管線全數上線！")
+
+AI_CARE_LABELS = [
+    "日常生理需求（吃飯、喝水、上廁所、睡覺）", 
+    "急性醫療警戒（不舒服、身體疼痛、頭暈、胸悶）", 
+    "緊急意外傷害（跌倒、摔傷、撞到）", 
+    "一般閒聊與日常對話"
+]
+
+# 輔助函式：已知照護句型比對（care_intents.json）
+# 用意：ASR 對自然口語台語句子準確率不穩定，但幾個高頻、關鍵的照護意圖
+# （上廁所、喝水、拒絕服藥等）如果能命中固定對照表，就不用再經過「AI 分類 +
+# M2M100 自由翻譯」這條容易出錯的路，直接給保證正確的中文/越南文翻譯，
+# 速度更快、結果更穩定。命中不到才 fallback 到原本的 AI 分析流程。
+def match_known_care_intent(text: str):
+    for intent_code, data in CARE_INTENTS.items():
+        if any(phrase in text for phrase in data.get("match_phrases", [])):
+            return intent_code, data
+    return None, None
+
+
+# 輔助函式：真正調用 Facebook M2M100 模型進行 AI 翻譯
+def ai_translate(text: str, target_lang: str):
+    try:
+        tokenizer.src_lang = "zh"
+        encoded_zh = tokenizer(text, return_tensors="pt").to(device_str)
+        # max_new_tokens 限制生成長度、num_beams=1 關掉 beam search：實測過
+        # M2M100 在沒有限制的情況下，偶爾會對某些句子陷入重複生成迴圈，單次
+        # 呼叫從正常的幾秒暴增到 300+ 秒（跟 Breeze ASR 之前踩過的同一種問題）。
+        # 長者的照護短句通常很短，128 tokens 綽綽有餘。
+        generated_tokens = translation_model.generate(
+            **encoded_zh,
+            forced_bos_token_id=tokenizer.get_lang_id(target_lang),
+            max_new_tokens=128,
+            num_beams=1,
+        )
+        return tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+    except Exception as e:
+        print(f"[翻譯出錯] {str(e)}")
+        return "Translation Error"
+
+@app.post("/api/voice/listen-elder")
+async def listen_elder(file: UploadFile = File(...)):
+    file_path = os.path.join(UPLOAD_DIR, file.filename)
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        print(f"\n[AI 核心] 收到長者實體語音: {file.filename}")
+        
+    try:
+        # 1. 音訊解碼
+        audio_data, _sample_rate = librosa.load(file_path, sr=16000, mono=True)
+
+        # 2. 語音辨識（Breeze-ASR-26，transformers pipeline）
+        # max_new_tokens 限制生成長度：不限制的話 2B 模型偶爾會陷入重複生成迴圈，
+        # 一句話可能卡上數十分鐘（實測過）；num_beams=1 關閉 beam search 換取速度。
+        # return_timestamps=True 是保險：長者講話若剛好超過 30 秒，Whisper 架構
+        # 會強制要求這個參數才能處理，沒加會直接丟例外（也實測過）。
+        asr_out = asr_pipeline(
+            audio_data,
+            return_timestamps=True,
+            generate_kwargs={"max_new_tokens": 128, "num_beams": 1},
+        )
+
+        # 提取模型轉錄出的實際文字
+        detected_text = asr_out["text"].strip()
+
+        # --- 語言與意圖判定邏輯 ---
+        # Whisper 的語言 token 只有 <|zh|>/<|en|>/<|id|>，沒有台語(nan)/客語(hak)專屬 tag，
+        # 模型本身不會回傳方言標籤，只能對辨識出的文字做關鍵字比對來猜測方言。
+        # 用「命中詞數計分＋比較高低」取代舊版「先查 hakka、中一個詞就 break」的寫法：
+        # 舊寫法會讓 keywords.json 裡兩邊清單都有的共用詞（如「跌倒」「頭暈」其實是純國語詞彙，
+        # 沒有方言區分度）永遠因為 hakka 先檢查而誤判成客語，即使是純國語句子也一樣。
+        def _score_dialect(text: str, lexicon: dict):
+            best_intent, best_count = None, 0
+            for intent, words in lexicon.items():
+                count = sum(1 for w in words if w in text)
+                if count > best_count:
+                    best_intent, best_count = intent, count
+            return best_intent, best_count
+
+        hakka_intent, hakka_score = _score_dialect(detected_text, KEYWORDS.get("hakka", {}))
+        taiwanese_intent, taiwanese_score = _score_dialect(detected_text, KEYWORDS.get("taiwanese", {}))
+
+        detected_lang = "現代標準漢語 (國語)"
+        detected_intent = "general"
+
+        if hakka_score > taiwanese_score and hakka_score > 0:
+            detected_lang = "臺灣客家語"
+            detected_intent = hakka_intent
+        elif taiwanese_score > hakka_score and taiwanese_score > 0:
+            detected_lang = "臺灣台語 (閩南語)"
+            detected_intent = taiwanese_intent
+        # 分數相同（含兩邊都只命中同一個共用詞、或都沒中）時保守維持國語預設值，不亂猜
+
+        # 最終除錯紀錄
+        print(f"📌 [模型辨識文字]: '{detected_text}'")
+        print(f"📌 [判定結果]: 語言={detected_lang}, 意圖={detected_intent} (hakka={hakka_score}, taiwanese={taiwanese_score})")
+
+        # 2.5 已知照護句型比對（快速通道）
+        # 用「正規化前」的原始文字比對，理由跟方言判定一樣：Gemini 正規化會把
+        # 台語用字洗成標準中文，比對台語句型要在那之前做，才比對得到。
+        known_intent_code, known_intent = match_known_care_intent(detected_text)
+
+        if known_intent:
+            # 命中已知句型：直接用固定翻譯，不經過 Gemini 正規化/AI 分類/M2M100，
+            # 速度快、結果保證正確，不受 ASR 辨識自然口語不穩定的影響。
+            print(f"📌 [已知句型命中]: {known_intent_code} ({known_intent['label']})")
+            normalized_text = known_intent["mandarin"]
+            best_intent = known_intent["label"]
+            confidence_score = 1.0
+            severity_level = known_intent["severity_level"]
+            event_type = known_intent["event_type"]
+            notify_family = known_intent["notify_family"]
+            vi_trans = known_intent["vietnamese"]
+            id_trans = known_intent["indonesian"]
+        else:
+            # 2.6 AI 空耳/語意正規化（Gemini）
+            # 注意：方言判定（上面）一定要用「正規化前」的原始文字 detected_text，
+            # 因為正規化會把方言用字統一改寫成標準中文，正規化後的文字已經看不出方言痕跡。
+            # 但後面的意圖分類、翻譯要接語意正確的文字，不然空耳亂碼會直接被拿去翻譯。
+            normalized_text = detected_text
+            try:
+                ai_norm = get_ai_analysis(detected_text)
+                if ai_norm and ai_norm.get("normalized_chinese"):
+                    normalized_text = ai_norm["normalized_chinese"]
+                    print(f"📌 [AI 正規化後文字]: '{normalized_text}'")
+                else:
+                    print("⚠️ [AI 正規化無結果，改用原始 ASR 文字]")
+            except Exception as e:
+                print(f"⚠️ [AI 正規化失敗，改用原始 ASR 文字]: {e}")
+
+            # 3. 🔥【真・AI 語意分析】
+            analysis_res = classifier(normalized_text, candidate_labels=AI_CARE_LABELS)
+            best_intent = analysis_res["labels"][0]
+            confidence_score = analysis_res["scores"][0]
+
+            # --- 信心門檻邏輯 ---
+            # event_type 統一對應到規格定義的 9 種固定代碼：
+            # abdominal_pain / dizziness / chest_tightness / pain / refuse_medication /
+            # fall / help / general_need / unknown
+            # 注意：信心不足時明確標記 unknown，不再像舊版那樣悄悄改判成「一般閒聊」
+            # （等於裝作沒事）——AI 不確定的情況要讓看護/家屬知道「這句沒辦法判斷」，
+            # 而不是被系統自己吃掉、當作沒發生過。
+            if confidence_score < 0.5:
+                print(f"⚠️ [AI 信心不足]: {confidence_score:.2f}，標記為 unknown")
+                severity_level = "low"
+                event_type = "unknown"
+                notify_family = False
+            else:
+                print(f"📌 [AI 意圖分析結果]: {best_intent} (信心值: {confidence_score:.2f})")
+                severity_level = "low"
+                event_type = "general_need"
+                notify_family = False
+
+                if "意外傷害" in best_intent:
+                    severity_level = "high"
+                    event_type = "fall"
+                    notify_family = True
+                elif "醫療警戒" in best_intent:
+                    severity_level = "medium"
+                    event_type = "pain"
+                    notify_family = True
+                elif "日常生理需求" in best_intent:
+                    severity_level = "low"
+                    event_type = "general_need"
+                # 「一般閒聊與日常對話」高信心時也歸類為 general_need
+                # （規格 9 類裡沒有獨立的「純聊天」代碼，且與日常需求都屬於低風險、
+                # 不用通知家屬的情境，用同一個代碼收斂即可）
+
+            # 4. 🔥【真・AI 動態翻譯機】直接叫實體模型把正規化後的文字轉成越文與印尼文！
+            print(f"[AI 翻譯執行中...] 正在實時翻譯 '{normalized_text}'...")
+            vi_trans = ai_translate(normalized_text, "vi")  # 真正翻譯成越南文
+            id_trans = ai_translate(normalized_text, "id")  # 真正翻譯成印尼文
+
+        # 5. 存文字紀錄，事後可透過 GET /api/voice/records 查詢
+        save_care_record(
+            audio_filename=file.filename,
+            detected_lang=detected_lang,
+            raw_text=detected_text,
+            normalized_text=normalized_text,
+            matched_known_intent=known_intent_code,
+            predicted_intent=best_intent,
+            confidence=confidence_score,
+            event_type=event_type,
+            severity_level=severity_level,
+            notify_family=notify_family,
+            vietnamese_output=vi_trans,
+            indonesian_output=id_trans,
+        )
+
+        # 固定 JSON 契約（對齊團隊 AI 運算引擎層規格，欄位名稱/結構不可因模型
+        # 回答內容而改變，讓其他模組/前端可以穩定串接）：
+        # {original_text, normalized_chinese, vietnamese_text, event_type,
+        #  severity, notify_family, confidence}
+        # indonesian_text / detected_dialect / matched_known_intent 是額外附加欄位，
+        # 不在契約規定的必要欄位內，但不影響其他人只讀取契約規定欄位的解析方式。
+        return {
+            "original_text": detected_text,
+            "normalized_chinese": normalized_text,
+            "vietnamese_text": vi_trans,
+            "event_type": event_type,
+            "severity": severity_level,
+            "notify_family": notify_family,
+            "confidence": confidence_score,
+            "indonesian_text": id_trans,
+            "detected_dialect": detected_lang,
+            "matched_known_intent": known_intent_code
+        }
+    except Exception as e:  # 讓 'e' 對齊 'try'
+        print(f"❌ [AI 引擎崩潰] 原因: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"實體模型推論失敗: {str(e)}")
+            
+    finally:                # 讓 'f' 對齊 'try'
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+
+@app.get("/api/voice/records")
+async def get_care_records(limit: int = 50, severity_level: str = None):
+    """查詢文字紀錄，預設回傳最新 50 筆（依 created_at 由新到舊）。
+    可加 ?severity_level=high 只看高風險事件（例如跌倒、喘不過氣）。"""
+    try:
+        with sqlite3.connect(RECORDS_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            if severity_level:
+                cur = conn.execute(
+                    "SELECT * FROM care_records WHERE severity_level = ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (severity_level, limit),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM care_records ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                )
+            rows = [dict(r) for r in cur.fetchall()]
+        return {"status": "success", "count": len(rows), "records": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查詢紀錄失敗: {e}")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    # reload=True 會監看整個專案目錄；每次請求把音檔寫進/刪出 ./temp_audio 都會
+    # 被當成「程式碼變更」，觸發整個服務（含三個大模型）重新載入一次，記憶體疊加
+    # 幾次就會 OOM（mkl_malloc failed to allocate memory）。這支服務載入成本很高，
+    # 不適合開 reload；要改程式碼時手動重啟即可。
+    #
+    # 傳 app 物件本身，不要傳 "main:app" 字串：用字串時 uvicorn 會另外把這支檔案
+    # 當成一個叫 "main" 的全新模組再 import 一次（跟目前用 __main__ 執行的這份是
+    # 兩個不同的模組實例），導致最上面那三個大模型在同一個 process 裡被重複載入
+    # 兩遍，記憶體直接乘二。reload=False 時不需要字串形式，直接傳物件即可。
+    uvicorn.run(app, host="127.0.0.1", port=8001, reload=False)
