@@ -1,0 +1,172 @@
+{
+  "toilet": {
+    "label": "上廁所",
+    "match_phrases": ["我欲去便所", "我愛去便所", "我欲放尿", "欲去便所", "我要去廁所", "去廁所", "我想上廁所", "我要上廁所"],
+    "mandarin": "我要去廁所",
+    "vietnamese": "Tôi muốn đi vệ sinh",
+    "indonesian": "Saya mau ke toilet",
+    "event_type": "general_need",
+    "severity_level": "low",
+    "notify_family": false
+  },
+  "eating": {
+    "label": "吃飯",
+    "match_phrases": ["我欲食飯", "我想欲食飯", "食飯啦", "我要吃飯", "我想吃飯", "吃飯"],
+    "mandarin": "我要吃飯",
+    "vietnamese": "Tôi muốn ăn cơm",
+    "indonesian": "Saya mau makan",
+    "event_type": "general_need",
+    "severity_level": "low",
+    "notify_family": false
+  },
+  "sleeping": {
+    "label": "睡覺",
+    "match_phrases": ["我想欲睏", "我欲去睏", "睏去矣", "我想睡覺", "我要睡覺", "想睡覺"],
+    "mandarin": "我想睡覺",
+    "vietnamese": "Tôi muốn ngủ",
+    "indonesian": "Saya mau tidur",
+    "event_type": "general_need",
+    "severity_level": "low",
+    "notify_family": false
+  },
+  "thirsty": {
+    "label": "喝水",
+    "match_phrases": ["我欲食水", "我想欲啉水", "我欲啉水", "我想喝水", "我要喝水", "想喝水"],
+    "mandarin": "我想喝水",
+    "vietnamese": "Tôi muốn uống nước",
+    "indonesian": "Saya mau minum air",
+    "event_type": "general_need",
+    "severity_level": "low",
+    "notify_family": false
+  },
+  "feeling_cold": {
+    "label": "覺得冷",
+    "match_phrases": ["遮會冷", "我感覺遮會冷", "我誠寒", "我覺得冷", "好冷", "我很冷"],
+    "mandarin": "我覺得冷",
+    "vietnamese": "Tôi thấy lạnh",
+    "indonesian": "Saya merasa dingin",
+    "event_type": "general_need",
+    "severity_level": "low",
+    "notify_family": false
+  },
+  "feeling_hot": {
+    "label": "覺得熱",
+    "match_phrases": ["足熱", "我感覺足熱", "我覺得很熱", "好熱", "我很熱"],
+    "mandarin": "我覺得很熱",
+    "vietnamese": "Tôi thấy nóng",
+    "indonesian": "Saya merasa panas",
+    "event_type": "general_need",
+    "severity_level": "low",
+    "notify_family": false
+  },
+  "want_rest": {
+    "label": "想休息",
+    "match_phrases": ["加歇睏", "我欲歇睏", "我想欲歇睏", "我想休息", "我要休息", "想休息"],
+    "mandarin": "我想休息",
+    "vietnamese": "Tôi muốn nghỉ ngơi",
+    "indonesian": "Saya mau istirahat",
+    "event_type": "general_need",
+    "severity_level": "low",
+    "notify_family": false
+  },
+  "abdominal_pain": {
+    "label": "腹痛",
+    "match_phrases": ["我腹肚痛", "腹肚真痛", "我的腹肚痛", "我肚子痛", "肚子痛", "肚子很痛", "我肚子很痛"],
+    "mandarin": "我肚子痛",
+    "vietnamese": "Tôi đau bụng",
+    "indonesian": "Perut saya sakit",
+    "event_type": "abdominal_pain",
+    "severity_level": "medium",
+    "notify_family": true
+  },
+  "headache": {
+    "label": "頭痛",
+    "match_phrases": ["頭殼疼", "我頭殼咧疼", "我頭殼真疼", "我頭痛", "頭痛", "我頭很痛", "頭很痛"],
+    "mandarin": "我頭痛",
+    "vietnamese": "Tôi đau đầu",
+    "indonesian": "Saya sakit kepala",
+    "event_type": "pain",
+    "severity_level": "medium",
+    "notify_family": true
+  },
+  "dizzy": {
+    "label": "頭暈",
+    "match_phrases": ["頭暈", "烏暗眩", "我頭殼咧暈", "我頭暈", "我很暈", "頭很暈"],
+    "mandarin": "我頭暈",
+    "vietnamese": "Tôi bị chóng mặt",
+    "indonesian": "Saya pusing",
+    "event_type": "dizziness",
+    "severity_level": "medium",
+    "notify_family": true
+  },
+  "chest_tightness": {
+    "label": "胸悶",
+    "match_phrases": ["心頭悶", "胸坎實實", "我胸口很悶", "胸口很悶", "胸悶", "我胸悶"],
+    "mandarin": "我胸口很悶",
+    "vietnamese": "Tôi cảm thấy tức ngực",
+    "indonesian": "Dada saya terasa sesak",
+    "event_type": "chest_tightness",
+    "severity_level": "high",
+    "notify_family": true
+  },
+  "shortness_of_breath": {
+    "label": "喘不過氣",
+    "match_phrases": ["喘無氣", "咇怦喘", "我喘不過氣", "喘不過氣", "呼吸困難", "我不能呼吸"],
+    "mandarin": "我喘不過氣",
+    "vietnamese": "Tôi khó thở",
+    "indonesian": "Saya sesak napas",
+    "event_type": "pain",
+    "severity_level": "high",
+    "notify_family": true
+  },
+  "general_unwell": {
+    "label": "不舒服",
+    "match_phrases": ["無爽快", "我感覺無爽快", "我不舒服", "不舒服", "我很不舒服"],
+    "mandarin": "我不舒服",
+    "vietnamese": "Tôi cảm thấy không khỏe",
+    "indonesian": "Saya merasa tidak enak badan",
+    "event_type": "pain",
+    "severity_level": "medium",
+    "notify_family": true
+  },
+  "body_ache": {
+    "label": "腰酸背痛",
+    "match_phrases": ["腰痠背疼", "關節疼", "我腰酸背痛", "腰酸背痛", "我全身痠痛", "關節痛"],
+    "mandarin": "我腰酸背痛",
+    "vietnamese": "Tôi bị đau lưng và nhức mỏi",
+    "indonesian": "Punggung dan sendi saya sakit",
+    "event_type": "pain",
+    "severity_level": "low",
+    "notify_family": false
+  },
+  "fall_accident": {
+    "label": "跌倒",
+    "match_phrases": ["我跋倒矣", "我跌倒矣", "挵著矣", "我跌倒了", "跌倒了", "我摔倒了", "摔倒了"],
+    "mandarin": "我跌倒了",
+    "vietnamese": "Tôi bị ngã",
+    "indonesian": "Saya jatuh",
+    "event_type": "fall",
+    "severity_level": "high",
+    "notify_family": true
+  },
+  "refuse_medication": {
+    "label": "拒絕服藥",
+    "match_phrases": ["我無愛食藥", "我毋食藥", "免食藥啦", "我不想吃藥", "不想吃藥", "我不要吃藥", "不吃藥"],
+    "mandarin": "我不想吃藥",
+    "vietnamese": "Tôi không muốn uống thuốc",
+    "indonesian": "Saya tidak mau minum obat",
+    "event_type": "refuse_medication",
+    "severity_level": "medium",
+    "notify_family": true
+  },
+  "help_request": {
+    "label": "求助",
+    "match_phrases": ["救命", "來人啊", "有人在無", "我需要幫忙", "來人喔", "有人佇無", "救我"],
+    "mandarin": "救命，我需要幫忙",
+    "vietnamese": "Cứu tôi, tôi cần giúp đỡ",
+    "indonesian": "Tolong, saya butuh bantuan",
+    "event_type": "help",
+    "severity_level": "high",
+    "notify_family": true
+  }
+}
