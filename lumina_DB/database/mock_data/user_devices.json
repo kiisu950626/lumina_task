@@ -1,0 +1,23 @@
+[
+  {
+    "user_id": "11111111-1111-1111-1111-111111111111",
+    "device_name": "王大明的 iPhone 15",
+    "device_type": "ios",
+    "fcm_token": "fake-fcm-token-family-1",
+    "last_active_at": "2026-07-13T12:00:00Z"
+  },
+  {
+    "user_id": "11111111-1111-1111-1111-111111111112",
+    "device_name": "小玲的 iPad",
+    "device_type": "ios",
+    "fcm_token": "fake-fcm-token-family-2",
+    "last_active_at": "2026-07-14T09:00:00Z"
+  },
+  {
+    "user_id": "22222222-2222-2222-2222-222222222222",
+    "device_name": "阿秋的 Samsung Galaxy",
+    "device_type": "android",
+    "fcm_token": "fake-fcm-token-caregiver-1",
+    "last_active_at": "2026-07-14T08:00:00Z"
+  }
+]

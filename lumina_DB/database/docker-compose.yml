@@ -1,0 +1,39 @@
+
+services:
+  postgres:
+    # 告訴 Docker 使用同目錄下的 Dockerfile 進行建置
+    build: .
+    container_name: curago_postgres
+    environment:
+      # 使用環境變數注入，並給予預設值防呆
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-postgres}
+      TZ: Asia/Taipei
+    # 啟動時必須預先載入 pg_cron，並指定它在我們的主資料庫運行
+    command: ["postgres", "-c", "shared_preload_libraries=pg_cron", "-c", "cron.database_name=${DB_NAME:-postgres}"]
+    ports:
+      - "5432:5432"
+    volumes:
+      - curago_pgdata:/var/lib/postgresql/data
+      - ./relational/schema.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: curago_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL:
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5051:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  curago_pgdata:

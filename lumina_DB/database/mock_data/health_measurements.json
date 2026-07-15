@@ -1,0 +1,67 @@
+[
+  {
+    "elder_id": "33333333-3333-3333-3333-333333333333",
+    "heart_rate": 75,
+    "systolic_bp": 120,
+    "diastolic_bp": 78,
+    "blood_sugar": 92.0,
+    "meal_context": "before_meal",
+    "data_source": "smartwatch",
+    "ai_evaluation": "normal",
+    "ai_reasoning": "各項數值平穩",
+    "ai_suggestion": "保持日常作息",
+    "measured_at": "2026-07-10T08:00:00Z"
+  },
+  {
+    "elder_id": "33333333-3333-3333-3333-333333333333",
+    "heart_rate": 78,
+    "systolic_bp": 125,
+    "diastolic_bp": 82,
+    "blood_sugar": 140.5,
+    "meal_context": "after_meal",
+    "data_source": "manual",
+    "ai_evaluation": "normal",
+    "ai_reasoning": "飯後血糖略高但屬正常波動",
+    "ai_suggestion": "注意下一餐澱粉攝取",
+    "measured_at": "2026-07-11T13:00:00Z"
+  },
+  {
+    "elder_id": "33333333-3333-3333-3333-333333333333",
+    "heart_rate": 82,
+    "systolic_bp": 135,
+    "diastolic_bp": 88,
+    "blood_sugar": 98.0,
+    "meal_context": "fasting",
+    "data_source": "smartwatch",
+    "ai_evaluation": "warning",
+    "ai_reasoning": "血壓有上升趨勢",
+    "ai_suggestion": "請留意是否有頭暈症狀",
+    "measured_at": "2026-07-12T07:30:00Z"
+  },
+  {
+    "elder_id": "33333333-3333-3333-3333-333333333333",
+    "heart_rate": 72,
+    "systolic_bp": 118,
+    "diastolic_bp": 75,
+    "blood_sugar": 105.0,
+    "meal_context": "before_meal",
+    "data_source": "manual",
+    "ai_evaluation": "normal",
+    "ai_reasoning": "血壓已回穩",
+    "ai_suggestion": "持續按時服藥",
+    "measured_at": "2026-07-13T18:00:00Z"
+  },
+  {
+    "elder_id": "33333333-3333-3333-3333-333333333333",
+    "heart_rate": 95,
+    "systolic_bp": 145,
+    "diastolic_bp": 92,
+    "blood_sugar": null,
+    "meal_context": null,
+    "data_source": "smartwatch",
+    "ai_evaluation": "critical",
+    "ai_reasoning": "心率與血壓異常飆高，可能與跌倒事件有關",
+    "ai_suggestion": "已觸發異常事件警報",
+    "measured_at": "2026-07-14T10:05:00Z"
+  }
+]
