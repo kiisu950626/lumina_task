@@ -30,7 +30,7 @@ DetectorFactory.seed = 0 # 確保偵測穩定
 # 辨識成「咖逃呼很痛」），若不修正就直接丟給翻譯模型，翻出來的東西也會跟著錯。
 # ai_translator.py 用 Gemini 把這種亂碼先正規化成語意正確的標準中文再繼續。
 sys.path.append(os.path.join(base_dir, "Taiwan-Tongues-ASR-CE", "api"))
-from ai_translator import get_ai_analysis
+from ai_translator import get_ai_analysis, polish_trend_summary
 
 if not os.getenv("GEMINI_API_KEY"):
     print("⚠️ [警告] 未偵測到 GEMINI_API_KEY（應設定於 Taiwan-Tongues-ASR-CE/api/.env），"
@@ -497,9 +497,24 @@ async def get_trend_summary(elder_id: str):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                return generate_trend_summary(cur, elder_id)
+                summary = generate_trend_summary(cur, elder_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"趨勢判斷查詢失敗: {e}")
+
+    # 把規則邏輯算好的數字描述，額外潤飾成一段給家屬看的自然語句。
+    # 判斷本身在上面 generate_trend_summary() 已經算完，這裡只是「講得更順」，
+    # 失敗（額度用盡/連線問題）就不設 narrative，前端改顯示 findings 原始清單，
+    # 不會讓整個趨勢查詢因為這一步失敗而掛掉。
+    summary["narrative"] = None
+    if summary["has_notable_change"]:
+        try:
+            summary["narrative"] = polish_trend_summary(
+                summary["findings"], summary["urgent_findings"]
+            )
+        except Exception as e:
+            print(f"⚠️ [趨勢摘要潤飾失敗，不影響原始數字描述]: {e}")
+
+    return summary
 
 
 if __name__ == "__main__":
