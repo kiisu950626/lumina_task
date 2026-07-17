@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import torch
 from transformers import pipeline, M2M100ForConditionalGeneration, M2M100Tokenizer
@@ -105,6 +105,45 @@ def save_care_record(**fields):
 
 _ensure_records_schema()
 
+# --- Postgres 正式資料庫（隊友負責的 lumina_DB/database）---
+# 跟 SQLite 並存，不取代：Postgres 連不上時（例如本機沒開 Docker）整個服務
+# 還是要能正常運作，只是這筆事件不會被存進 Postgres，SQLite 那份紀錄不受影響。
+#
+# 注意：lumina_DB/database/relational/queries.py 在「被 import 的當下」就會建立
+# 資料庫連線池（ThreadedConnectionPool 是模組層級變數，不是等到真的查詢才連），
+# 所以這裡的 import 也要包在 try/except 裡，不然 Postgres 沒開時 import 這一行
+# 本身就會把整個 main.py 啟動炸掉。
+LUMINA_DB_PATH = os.path.join(base_dir, "lumina_DB", "database")
+DB_AVAILABLE = False
+if os.path.isdir(LUMINA_DB_PATH):
+    sys.path.append(LUMINA_DB_PATH)
+    try:
+        from relational.queries import execute_create_event, get_db_connection
+        DB_AVAILABLE = True
+        print("✅ [Postgres] 連線池建立成功，語音事件會同步寫入正式資料庫。")
+    except Exception as e:
+        print(f"⚠️ [警告] Postgres 連不上（{e}），本次執行僅寫入本地 SQLite，不影響其他功能。")
+else:
+    print("⚠️ [警告] 找不到 lumina_DB/database，僅寫入本地 SQLite。")
+
+# 模組五：趨勢判斷（純規則統計，不叫 AI，理由見 trend_analysis.py 檔頭說明）
+sys.path.append(os.path.join(base_dir, "Taiwan-Tongues-ASR-CE", "api"))
+from trend_analysis import generate_trend_summary
+
+# 測試用預設值：來自隊友 lumina_DB/database/mock_data 的假資料（王阿公 / 看護阮氏秋）。
+# 之後前端有登入系統、知道實際是哪個長者/哪個裝置在用，要把這兩個值換成真的
+# elder_id / reporter_id，這裡只是先讓 API 在沒有登入系統的現在也能測試。
+DEFAULT_ELDER_ID = "33333333-3333-3333-3333-333333333333"
+DEFAULT_REPORTER_ID = "22222222-2222-2222-2222-222222222222"
+
+# main.py 的方言判斷輸出是人看的完整說明（如「臺灣台語 (閩南語)」），但 Postgres
+# 的 source_language 欄位限制 VARCHAR(10)，要轉成短代碼再寫入。
+DIALECT_TO_LANG_CODE = {
+    "現代標準漢語 (國語)": "zh-TW",
+    "臺灣台語 (閩南語)": "nan",
+    "臺灣客家語": "hak",
+}
+
 app = FastAPI(title="CuraGo 護家通 - 數發部規格多語偵測與真 AI 語意分析/翻譯完全體")
 
 app.add_middleware(
@@ -203,7 +242,13 @@ def ai_translate(text: str, target_lang: str):
         return "Translation Error"
 
 @app.post("/api/voice/listen-elder")
-async def listen_elder(file: UploadFile = File(...)):
+async def listen_elder(
+    file: UploadFile = File(...),
+    elder_id: str = Form(DEFAULT_ELDER_ID),
+    reporter_id: str = Form(DEFAULT_REPORTER_ID),
+):
+    # elder_id/reporter_id 先給預設值（隊友 mock_data 裡的假長者/假看護），方便在
+    # 前端還沒接登入系統的現在也能測試；等前端知道實際是誰在用，改成必填、不給預設值。
     file_path = os.path.join(UPLOAD_DIR, file.filename)
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -351,6 +396,28 @@ async def listen_elder(file: UploadFile = File(...)):
             indonesian_output=id_trans,
         )
 
+        # 5.5 同步寫入 Postgres 正式資料庫（隊友負責）。跟上面的 SQLite 一樣採
+        # 「失敗就跳過」原則：Postgres 沒開/連不上/elder_id 查無此人，都只印警告，
+        # 不影響本次語音處理的回應——使用者不該因為資料庫問題而收不到辨識結果。
+        if DB_AVAILABLE:
+            try:
+                ok, result = execute_create_event(
+                    elder_id=elder_id,
+                    reporter_id=reporter_id,
+                    source_language=DIALECT_TO_LANG_CODE.get(detected_lang, "zh-TW"),
+                    original_text=detected_text,
+                    event_type=event_type,
+                    severity=severity_level,
+                    normalized_text=normalized_text,
+                    translations={"vi": vi_trans, "id": id_trans},
+                )
+                if ok:
+                    print(f"✅ [Postgres] 事件已寫入，event_id={result.get('id')}")
+                else:
+                    print(f"⚠️ [Postgres 寫入失敗，不影響本次回應]: {result}")
+            except Exception as e:
+                print(f"⚠️ [Postgres 寫入失敗，不影響本次回應]: {e}")
+
         # 固定 JSON 契約（對齊團隊 AI 運算引擎層規格，欄位名稱/結構不可因模型
         # 回答內容而改變，讓其他模組/前端可以穩定串接）：
         # {original_text, normalized_chinese, vietnamese_text, event_type,
@@ -400,6 +467,21 @@ async def get_care_records(limit: int = 50, severity_level: str = None):
         return {"status": "success", "count": len(rows), "records": rows}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查詢紀錄失敗: {e}")
+
+
+@app.get("/api/voice/trend/{elder_id}")
+async def get_trend_summary(elder_id: str):
+    """模組五：趨勢判斷。比較過去 7 天跟前 7 天的疼痛事件次數、血壓平均值，
+    只回傳資料變化描述，不含任何醫療判斷/建議字眼（規格要求）。
+    需要 Postgres 才能查（趨勢資料存在 events / health_measurements 表）。"""
+    if not DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Postgres 未連線，趨勢判斷需要正式資料庫。")
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                return generate_trend_summary(cur, elder_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"趨勢判斷查詢失敗: {e}")
 
 
 if __name__ == "__main__":

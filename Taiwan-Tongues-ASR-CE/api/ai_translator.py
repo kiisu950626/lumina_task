@@ -28,7 +28,11 @@ def get_ai_analysis(text: str, max_retries: int = 3):
         print("❌ 錯誤：無法讀取 GEMINI_API_KEY")
         return None
 
-    client = genai.Client(api_key=api_key)
+    # 一定要設 timeout：實測過沒設的話，Gemini 配額用盡時偶爾會讓連線掛住不回應，
+    # 而不是快速回 429 錯誤，導致這個呼叫卡住不放，把整個單執行緒的 main.py 服務
+    # 一起卡死，後面所有請求都連不進來。20 秒逾時後會拋例外，讓下面的重試/
+    # fallback 機制接手，不會再拖垮整個服務。
+    client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=20000))
     
     # 3. 提示詞更新：拿掉台語範例，改為翻譯印尼文
     system_prompt = """
