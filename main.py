@@ -128,7 +128,7 @@ else:
 
 # 模組五：趨勢判斷（純規則統計，不叫 AI，理由見 trend_analysis.py 檔頭說明）
 sys.path.append(os.path.join(base_dir, "Taiwan-Tongues-ASR-CE", "api"))
-from trend_analysis import generate_trend_summary
+from trend_analysis import generate_trend_summary, generate_daily_summary, save_daily_summary
 
 # 文字轉向量：改用本機模型，取代隊友原本 ai_client.py 呼叫 Gemini 的版本
 # （見 local_embeddings.py 檔頭說明）。模型本身在第一次呼叫時才真的載入，
@@ -515,6 +515,26 @@ async def get_trend_summary(elder_id: str):
             print(f"⚠️ [趨勢摘要潤飾失敗，不影響原始數字描述]: {e}")
 
     return summary
+
+
+@app.post("/api/voice/daily-summary/{elder_id}")
+async def create_daily_summary(elder_id: str):
+    """把「今天」單獨一天的語音事件+健康量測彙整成一筆摘要，寫進
+    daily_summaries 表（同一天重複呼叫會覆蓋更新，不會重複產生紀錄）。
+    跟 /api/voice/trend 的差異：trend 是比較「這期 vs 上期」，這支是單純整理
+    「今天發生了什麼」，兩者互補使用。overall_status 一樣是規則算出來的
+    （urgent/attention/stable），不是 AI 判斷。"""
+    if not DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Postgres 未連線，每日摘要需要正式資料庫。")
+    try:
+        with get_db_connection(autocommit=False) as conn:
+            with conn.cursor() as cur:
+                summary = generate_daily_summary(cur, elder_id)
+                save_daily_summary(cur, summary)
+            conn.commit()
+        return summary
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"每日摘要產生失敗: {e}")
 
 
 if __name__ == "__main__":

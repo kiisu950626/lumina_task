@@ -160,6 +160,112 @@ def check_bp_crisis(cur, elder_id: str, days: int = 3) -> str | None:
     )
 
 
+# 語音事件對應的嚴重度，用來決定當天的 overall_status（跟 main.py 產生 events
+# 時用的 severity 值 low/medium/high 對齊，crisis 只有血壓急症門檻會用到）
+_STATUS_RANK = {"stable": 0, "attention": 1, "urgent": 2}
+
+
+def generate_daily_summary(cur, elder_id: str, target_date=None) -> dict:
+    """
+    把「今天」單獨一天發生的事（語音事件 + 健康量測）彙整成一份摘要，對應
+    daily_summaries 表。跟 generate_trend_summary() 的差異：趨勢判斷是比較
+    「這期 vs 上期」，這裡是單純整理「今天發生了什麼」，兩者互補、不重疊。
+
+    overall_status 一樣是規則算出來的（不是 AI 判斷）：
+      urgent：今天有 high severity 的語音事件，或今天有血壓急症門檻讀數
+      attention：今天有 medium severity 事件，或今天有疼痛/不適類事件
+      stable：以上皆無
+    """
+    if target_date is None:
+        target_date = datetime.now(timezone.utc).date()
+
+    # 當天的語音事件
+    cur.execute(
+        """
+        SELECT event_type, severity, original_text, created_at
+        FROM events
+        WHERE elder_id = %s::uuid
+          AND created_at::date = %s
+          AND deleted_at IS NULL
+        ORDER BY created_at;
+        """,
+        (elder_id, target_date),
+    )
+    event_rows = cur.fetchall()
+
+    # 當天的健康量測
+    cur.execute(
+        """
+        SELECT systolic_bp, diastolic_bp, heart_rate, blood_sugar, measured_at
+        FROM health_measurements
+        WHERE elder_id = %s::uuid
+          AND measured_at::date = %s
+        ORDER BY measured_at;
+        """,
+        (elder_id, target_date),
+    )
+    health_rows = cur.fetchall()
+
+    # --- 決定 overall_status（規則邏輯）---
+    status = "stable"
+    has_pain_event = any(row[0] in PAIN_EVENT_TYPES for row in event_rows)
+    has_high_severity = any(row[1] == "high" for row in event_rows)
+    has_medium_severity = any(row[1] == "medium" for row in event_rows)
+    has_crisis_bp = any(
+        (row[0] is not None and row[0] >= 180) or (row[1] is not None and row[1] >= 120)
+        for row in health_rows
+    )
+    if has_high_severity or has_crisis_bp:
+        status = "urgent"
+    elif has_medium_severity or has_pain_event:
+        status = "attention"
+
+    # --- 組裝內容描述（純事實列點，不下判斷）---
+    lines = []
+    if event_rows:
+        lines.append(f"今日語音互動共 {len(event_rows)} 次。")
+        type_counts = {}
+        for row in event_rows:
+            type_counts[row[0]] = type_counts.get(row[0], 0) + 1
+        type_desc = "、".join(f"{t} {c} 次" for t, c in type_counts.items())
+        lines.append(f"事件類型：{type_desc}。")
+    else:
+        lines.append("今日無語音互動紀錄。")
+
+    if health_rows:
+        bp_readings = [(r[0], r[1]) for r in health_rows if r[0] is not None]
+        if bp_readings:
+            avg_sys = round(sum(r[0] for r in bp_readings) / len(bp_readings))
+            avg_dia = round(sum(r[1] for r in bp_readings) / len(bp_readings))
+            lines.append(f"今日血壓量測 {len(bp_readings)} 筆，平均 {avg_sys}/{avg_dia} mmHg。")
+    else:
+        lines.append("今日無健康數據量測紀錄。")
+
+    return {
+        "elder_id": elder_id,
+        "summary_date": target_date.isoformat(),
+        "overall_status": status,
+        "content": " ".join(lines),
+        "event_count": len(event_rows),
+        "health_measurement_count": len(health_rows),
+    }
+
+
+def save_daily_summary(cur, summary: dict) -> None:
+    """把 generate_daily_summary() 算好的結果寫進 daily_summaries 表。
+    同一位長者同一天只會有一筆（schema 的 UNIQUE(elder_id, summary_date)
+    限制），重複呼叫會更新內容，不會產生重複紀錄。"""
+    cur.execute(
+        """
+        INSERT INTO daily_summaries (elder_id, summary_date, overall_status, content)
+        VALUES (%s::uuid, %s, %s, %s)
+        ON CONFLICT (elder_id, summary_date)
+        DO UPDATE SET overall_status = EXCLUDED.overall_status, content = EXCLUDED.content;
+        """,
+        (summary["elder_id"], summary["summary_date"], summary["overall_status"], summary["content"]),
+    )
+
+
 def generate_trend_summary(cur, elder_id: str) -> dict:
     """
     彙整所有趨勢描述，回傳給 API / 每日摘要使用。
