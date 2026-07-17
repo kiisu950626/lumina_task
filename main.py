@@ -130,6 +130,11 @@ else:
 sys.path.append(os.path.join(base_dir, "Taiwan-Tongues-ASR-CE", "api"))
 from trend_analysis import generate_trend_summary
 
+# 文字轉向量：改用本機模型，取代隊友原本 ai_client.py 呼叫 Gemini 的版本
+# （見 local_embeddings.py 檔頭說明）。模型本身在第一次呼叫時才真的載入，
+# 不拖慢服務啟動速度。
+from local_embeddings import get_embedding
+
 # 測試用預設值：來自隊友 lumina_DB/database/mock_data 的假資料（王阿公 / 看護阮氏秋）。
 # 之後前端有登入系統、知道實際是哪個長者/哪個裝置在用，要把這兩個值換成真的
 # elder_id / reporter_id，這裡只是先讓 API 在沒有登入系統的現在也能測試。
@@ -261,6 +266,13 @@ async def listen_elder(
         # 2. 語音辨識（Breeze-ASR-26，transformers pipeline）
         # max_new_tokens 限制生成長度：不限制的話 2B 模型偶爾會陷入重複生成迴圈，
         # 一句話可能卡上數十分鐘（實測過）；num_beams=1 關閉 beam search 換取速度。
+        #
+        # 曾經試過改成 num_beams=5（4句清晰廣告實測錯字率 37.0%→31.3%），但後來用
+        # 別的音檔測試時，num_beams=5 自己就觸發了重複生成迴圈（"小紅帽不看太陽的
+        # 位置"重複12次、耗時2分47秒）——證實單獨開 num_beams=5 也不安全，不是只有
+        # 加提示詞才會發生，4句樣本數太少沒測到。demo 穩定性優先，先退回 num_beams=1，
+        # 之後要提升正確率，得先加 repetition_penalty/no_repeat_ngram_size 這類重複
+        # 懲罰機制重新驗證過，確認不會卡死才能再開 num_beams=5。
         # return_timestamps=True 是保險：長者講話若剛好超過 30 秒，Whisper 架構
         # 會強制要求這個參數才能處理，沒加會直接丟例外（也實測過）。
         asr_out = asr_pipeline(
@@ -401,6 +413,11 @@ async def listen_elder(
         # 不影響本次語音處理的回應——使用者不該因為資料庫問題而收不到辨識結果。
         if DB_AVAILABLE:
             try:
+                # 本機算語意向量，給之後的「相似歷史事件搜尋」用。存進資料庫的內容
+                # 用 passage 前綴（見 local_embeddings.py），算失敗就存 NULL，
+                # 不要塞假向量污染語意搜尋（隊友原本 ai_client.py 失敗時塞全 0 向量
+                # 的做法容易讓搜尋結果被這些假向量互相誤判成「相似」，這裡刻意不這樣做）。
+                embedding_vector = get_embedding(normalized_text)
                 ok, result = execute_create_event(
                     elder_id=elder_id,
                     reporter_id=reporter_id,
@@ -410,6 +427,7 @@ async def listen_elder(
                     severity=severity_level,
                     normalized_text=normalized_text,
                     translations={"vi": vi_trans, "id": id_trans},
+                    embedding_vector=embedding_vector,
                 )
                 if ok:
                     print(f"✅ [Postgres] 事件已寫入，event_id={result.get('id')}")
