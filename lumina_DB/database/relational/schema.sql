@@ -168,6 +168,8 @@ CREATE TABLE health_measurements (
     CONSTRAINT check_bp_logic CHECK (systolic_bp > diastolic_bp), -- 高壓必須大於低壓
     blood_sugar      NUMERIC(5,1) CHECK (blood_sugar > 0),
     meal_context     VARCHAR(20) CHECK (meal_context IN ('before_meal', 'after_meal', 'fasting')),
+    steps           INT CHECK (steps >= 0),     
+    sleep_hours     NUMERIC(4,1) CHECK (sleep_hours >= 0),
 
     data_source      VARCHAR(50) NOT NULL DEFAULT 'manual', --手動輸入還是手錶的
     ai_evaluation    VARCHAR(50),

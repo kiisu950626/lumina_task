@@ -245,7 +245,7 @@ def seed_health_measurements(cur) -> None:
     # 補齊所有的 AI 推論欄位與資料來源
     columns = [
         "elder_id", "heart_rate", "systolic_bp", "diastolic_bp", "blood_sugar", 
-        "meal_context", "data_source", "ai_evaluation", "ai_reasoning", "ai_suggestion", "measured_at"
+        "meal_context", "data_source","steps", "sleep_hours", "ai_evaluation", "ai_reasoning", "ai_suggestion", "measured_at"
     ]
     rows = [
         (
@@ -256,6 +256,8 @@ def seed_health_measurements(cur) -> None:
             item.get("blood_sugar"),
             item.get("meal_context"),
             item.get("data_source", "manual"),
+            item.get("steps"),
+            item.get("sleep_hours"),
             item.get("ai_evaluation"),
             item.get("ai_reasoning"),
             item.get("ai_suggestion"),

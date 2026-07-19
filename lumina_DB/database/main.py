@@ -72,7 +72,9 @@ class HealthMetricCreate(BaseModel):
     diastolic_bp: Optional[int] = None
     blood_sugar: Optional[float] = None
     meal_context: Optional[str] = None
-
+    steps: Optional[int] = None
+    sleep_hours: Optional[float] = None
+    
 class TaskUpdate(BaseModel):
     status: str  # 例如: "completed", "missed"
 
@@ -130,7 +132,7 @@ def upload_health_metric(req: HealthMetricCreate):
         success, result = execute_record_health_measurement(
             req.elder_id, now_str, req.data_source, 
             req.heart_rate, req.systolic_bp, req.diastolic_bp, 
-            req.blood_sugar, req.meal_context
+            req.blood_sugar, req.meal_context, req.steps, req.sleep_hours
         )
         if not success: raise Exception(result)
         return {"status": "success", "data": result}

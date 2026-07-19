@@ -354,6 +354,8 @@ def execute_record_health_measurement(
     diastolic_bp: Optional[int] = None,
     blood_sugar: Optional[float] = None,
     meal_context: Optional[str] = None,
+    steps: Optional[int] = None,
+    sleep_hours: Optional[float] = None,
     ai_evaluation: Optional[str] = None,
     ai_reasoning: Optional[str] = None,
     ai_suggestion: Optional[str] = None,
@@ -374,15 +376,15 @@ def execute_record_health_measurement(
                     """
                     INSERT INTO health_measurements (
                         elder_id, heart_rate, systolic_bp, diastolic_bp, blood_sugar, 
-                        meal_context, data_source, ai_evaluation, ai_reasoning, 
+                        meal_context, steps, sleep_hours, data_source, ai_evaluation, ai_reasoning, 
                         ai_suggestion, measured_at
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     ) RETURNING id, measured_at, created_at;
                     """,
                     (
                         elder_pk, heart_rate, systolic_bp, diastolic_bp, blood_sugar,
-                        meal_context, data_source, ai_evaluation, ai_reasoning,
+                        meal_context, steps, sleep_hours, data_source, ai_evaluation, ai_reasoning,
                         ai_suggestion, measured_at
                     )
                 )
@@ -506,7 +508,7 @@ def execute_create_event(
 # ==========================================
 def query_recent_health_measurements(elder_id: str, limit: int = 10) -> list[dict]:
     """取得長者最近的健康數據"""
-    sql = "SELECT id, heart_rate, systolic_bp, diastolic_bp, blood_sugar, meal_context, data_source, measured_at FROM health_measurements WHERE elder_id = %s ORDER BY measured_at DESC LIMIT %s;"
+    sql = "SELECT id, heart_rate, systolic_bp, diastolic_bp, blood_sugar, meal_context, steps, sleep_hours, data_source, measured_at FROM health_measurements WHERE elder_id = %s ORDER BY measured_at DESC LIMIT %s;"
     with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             elder_pk = _resolve_elder_pk(cur, elder_id)
