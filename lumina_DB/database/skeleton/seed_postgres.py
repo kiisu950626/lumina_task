@@ -219,26 +219,27 @@ def seed_notifications(cur) -> None:
 def seed_chat_messages(cur) -> None:
     data = load_optional("chat_messages.json")
     columns = [
-        "sender_id", "receiver_id", "elder_id", "original_text", 
-        "translated_text", "source_language", "target_language", "is_read", "sent_at"
+        "group_id", "sender_id", "elder_id", "message_type", "content", 
+        "translated_text", "source_language", "target_language", "is_read", "created_at"
     ]
     rows = [
         (
+            item.get("group_id"),
             item.get("sender_id"),
-            item.get("receiver_id"),
             item.get("elder_id"),
-            item.get("original_text"),
+            item.get("message_type", "text"),
+            item.get("content"), # 對齊 SQL，把 original_text 放到 content
             item.get("translated_text"),
             item.get("source_language"),
             item.get("target_language"),
             item.get("is_read", False),
-            item.get("sent_at", datetime.now(timezone.utc).isoformat())
+            item.get("created_at", datetime.now(timezone.utc).isoformat()) # 改用 created_at
         )
         for item in data
     ]
     count = insert_many(cur, "chat_messages", columns, rows)
     print(f"  chat_messages: {count}")
-
+    
 def seed_health_measurements(cur) -> None:
     data = load_optional("health_measurements.json")
     # 補齊所有的 AI 推論欄位與資料來源

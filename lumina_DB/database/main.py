@@ -1,8 +1,8 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Literal
 
 # 匯入你已經寫好的神兵利器
 from skeleton.ai_client import get_embedding
@@ -83,7 +83,7 @@ class DeviceRegisterRequest(BaseModel):
 
 class ChatMessageRequest(BaseModel):
     sender_id: str
-    message_type: str # "text", "image", "audio"
+    message_type: Literal["text", "image", "audio", "system"] = "text" 
     content: str
 
 # ==========================================
@@ -100,8 +100,13 @@ def create_event(req: EventCreateRequest):
     try:
         embedding = get_embedding(req.original_text)
         success, result = execute_create_event(
-            req.elder_id, req.user_id, req.language, req.original_text, 
-            req.category, req.severity, embedding
+            req.elder_id, 
+            req.user_id, 
+            req.language, 
+            req.original_text, 
+            req.category, 
+            req.severity, 
+            embedding_vector=embedding  #明確指定這是 embedding_vector
         )
         if not success: raise Exception(result)
         return {"status": "success", "data": result}
@@ -121,7 +126,7 @@ def search_events(req: EventSearchRequest):
 @app.post("/api/v1/health", summary="上傳健康數據")
 def upload_health_metric(req: HealthMetricCreate):
     try:
-        now_str = datetime.utcnow().isoformat()
+        now_str = datetime.now(timezone.utc).isoformat()
         success, result = execute_record_health_measurement(
             req.elder_id, now_str, req.data_source, 
             req.heart_rate, req.systolic_bp, req.diastolic_bp, 

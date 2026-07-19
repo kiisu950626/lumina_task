@@ -1,0 +1,10 @@
+# --- PostgreSQL 資料庫連線 ---
+psycopg2-binary
+# --- AI 向量搜尋擴充 ---
+pgvector
+# --- 密碼加密 (Argon2) ---
+argon2-cffi
+# --- 讀取 .env 環境變數 ---
+python-dotenv
+
+google-genai
