@@ -143,6 +143,7 @@ from local_embeddings import get_embedding
 # elder_id / reporter_id，這裡只是先讓 API 在沒有登入系統的現在也能測試。
 DEFAULT_ELDER_ID = "33333333-3333-3333-3333-333333333333"
 DEFAULT_REPORTER_ID = "22222222-2222-2222-2222-222222222222"
+DEFAULT_GROUP_ID = "44444444-4444-4444-4444-444444444444"  # 王阿公的照護群組（mock_data/care_groups.json）
 
 # main.py 的方言判斷輸出是人看的完整說明（如「臺灣台語 (閩南語)」），但 Postgres
 # 的 source_language 欄位限制 VARCHAR(10)，要轉成短代碼再寫入。
@@ -230,16 +231,21 @@ def match_known_care_intent(text: str):
 
 
 # 輔助函式：真正調用 Facebook M2M100 模型進行 AI 翻譯
-def ai_translate(text: str, target_lang: str):
+# src_lang 開放可調（預設 zh，維持原本長者語音這條路徑的行為不變）：
+# 原本這裡寫死 src_lang="zh"，不管實際餵進去什麼語言都當中文處理——多語言
+# 翻譯正確率驗證時測過，餵英文文字進去雖然常常也能翻對（M2M100 分詞器對
+# 語言標記錯誤有一定容錯度），但這是運氣好、不是設計保證，看護回覆長者這個
+# 方向需要「越南文/印尼文→中文」，必須要能真的指定正確的來源語言。
+def ai_translate(text: str, target_lang: str, src_lang: str = "zh"):
     try:
-        tokenizer.src_lang = "zh"
-        encoded_zh = tokenizer(text, return_tensors="pt").to(device_str)
+        tokenizer.src_lang = src_lang
+        encoded = tokenizer(text, return_tensors="pt").to(device_str)
         # max_new_tokens 限制生成長度、num_beams=1 關掉 beam search：實測過
         # M2M100 在沒有限制的情況下，偶爾會對某些句子陷入重複生成迴圈，單次
         # 呼叫從正常的幾秒暴增到 300+ 秒（跟 Breeze ASR 之前踩過的同一種問題）。
         # 長者的照護短句通常很短，128 tokens 綽綽有餘。
         generated_tokens = translation_model.generate(
-            **encoded_zh,
+            **encoded,
             forced_bos_token_id=tokenizer.get_lang_id(target_lang),
             max_new_tokens=128,
             num_beams=1,
@@ -552,6 +558,85 @@ async def create_daily_summary(elder_id: str):
         return summary
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"每日摘要產生失敗: {e}")
+
+
+@app.post("/api/voice/caregiver-reply")
+async def caregiver_reply(
+    file: UploadFile = File(...),
+    source_language: str = Form(...),  # "vi"（越南文）或 "id"（印尼文），看護講哪種語言由呼叫端指定，不做自動偵測
+    elder_id: str = Form(DEFAULT_ELDER_ID),
+    group_id: str = Form(DEFAULT_GROUP_ID),
+    sender_id: str = Form(DEFAULT_REPORTER_ID),
+):
+    """
+    看護語音回覆長者：看護講越南文/印尼文 → 辨識 → 翻譯成中文，給長者聽/看得懂。
+    是 listen_elder 的反方向。實測過 Breeze 對印尼文語音辨識平均 CER 8.6%
+    （5句真實印尼文語料，3句零錯誤），直接沿用同一個 Breeze 模型做 ASR，
+    不用另外載入新模型。翻譯沿用 M2M100，這次改用 src_lang 參數指定正確的
+    來源語言（不是像 listen_elder 那樣固定假設輸入是中文）。
+    """
+    if source_language not in ("vi", "id"):
+        raise HTTPException(status_code=400, detail="source_language 必須是 'vi' 或 'id'")
+
+    file_path = os.path.join(UPLOAD_DIR, file.filename)
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        print(f"\n[看護回覆] 收到語音: {file.filename}（來源語言: {source_language}）")
+
+    try:
+        audio_data, _sample_rate = librosa.load(file_path, sr=16000, mono=True)
+
+        # 語音辨識：沿用 listen_elder 同一套設定（max_new_tokens 限制生成長度，
+        # 避免重複生成迴圈；num_beams=1 已驗證穩定，見 num_beams=5 那次踩雷紀錄）
+        asr_out = asr_pipeline(
+            audio_data,
+            return_timestamps=True,
+            generate_kwargs={"max_new_tokens": 128, "num_beams": 1},
+        )
+        original_text = asr_out["text"].strip()
+        print(f"📌 [看護回覆辨識文字]: '{original_text}'")
+
+        # 翻譯成中文給長者看/聽
+        translated_text = ai_translate(original_text, target_lang="zh", src_lang=source_language)
+        print(f"📌 [翻譯成中文]: '{translated_text}'")
+
+        # 存進 chat_messages（隊友的表，直接寫完整欄位，因為他現成的
+        # insert_chat_message() 沒有存 translated_text/source_language 這些，
+        # 見程式碼審查時發現的缺口）
+        message_id = None
+        if DB_AVAILABLE:
+            try:
+                with get_db_connection(autocommit=False) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO chat_messages (
+                                group_id, sender_id, elder_id, message_type,
+                                content, translated_text, source_language, target_language
+                            ) VALUES (%s::uuid, %s::uuid, %s::uuid, 'audio', %s, %s, %s, 'zh')
+                            RETURNING id;
+                            """,
+                            (group_id, sender_id, elder_id, original_text, translated_text, source_language),
+                        )
+                        message_id = cur.fetchone()[0]
+                    conn.commit()
+                print(f"✅ [Postgres] 看護回覆已寫入 chat_messages，id={message_id}")
+            except Exception as e:
+                print(f"⚠️ [Postgres 寫入失敗，不影響本次回應]: {e}")
+
+        return {
+            "original_text": original_text,
+            "translated_text": translated_text,
+            "source_language": source_language,
+            "target_language": "zh",
+            "message_id": str(message_id) if message_id else None,
+        }
+    except Exception as e:
+        print(f"❌ [看護回覆處理失敗] 原因: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"看護回覆處理失敗: {str(e)}")
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 
 if __name__ == "__main__":

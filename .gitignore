@@ -40,6 +40,7 @@ Taiwan-Tongues-ASR-CE/ey_psa_audio/
 Taiwan-Tongues-ASR-CE/moe_taigi_test_audio/
 Taiwan-Tongues-ASR-CE/test_audio/
 Taiwan-Tongues-ASR-CE/test_corpus_raw/
+Taiwan-Tongues-ASR-CE/id_samples/
 Taiwan-Tongues-ASR-CE/sample_corpus/
 Taiwan-Tongues-ASR-CE/_*.py
 Taiwan-Tongues-ASR-CE/*_results.json
