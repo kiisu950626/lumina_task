@@ -36,19 +36,21 @@ def _period_counts(cur, elder_id: str, event_types, days: int):
 
 
 def analyze_pain_trend(cur, elder_id: str, days: int = 7) -> str | None:
-    """比較「過去 N 天」跟「再前 N 天」的疼痛/不適類事件次數，只描述變化，不下結論。"""
+    """比較「過去 N 天」跟「再前 N 天」的疼痛/不適類事件次數。
+    只在次數增加時回報——這個函式結果會被放進橘色「建議聯絡醫療人員」層級，
+    次數減少是好消息、不是警訊，不該出現在需要留意的分級裡（之前的版本兩種
+    方向都回報，混進橘色分級後會誤導成「減少也要聯絡醫療人員」，已修正）。"""
     recent, previous = _period_counts(cur, elder_id, PAIN_EVENT_TYPES, days)
-    if recent == 0 and previous == 0:
+    if recent == 0:
         return None
     if previous == 0:
         return f"過去 {days} 天出現 {recent} 次疼痛/不適相關事件，前 {days} 天無相關紀錄。"
     diff = recent - previous
-    if diff == 0:
-        return None  # 沒有變化，不用特別提，避免資訊過載
-    direction = "增加" if diff > 0 else "減少"
+    if diff <= 0:
+        return None  # 持平或減少，不用特別提
     return (
         f"過去 {days} 天疼痛/不適相關事件 {recent} 次，"
-        f"較前 {days} 天的 {previous} 次{direction} {abs(diff)} 次。"
+        f"較前 {days} 天的 {previous} 次增加 {diff} 次。"
     )
 
 
@@ -131,33 +133,134 @@ def analyze_bp_vs_baseline(cur, elder_id: str, recent_days: int = 7, baseline_da
     )
 
 
-def check_bp_crisis(cur, elder_id: str, days: int = 3) -> str | None:
-    """
-    檢查最近 N 天內，有沒有單筆血壓量測落在「高血壓危象」等級（收縮壓 ≥180 或
-    舒張壓 ≥120）。這是醫學上公開定義、不分個人平常基準的急症等級數字——
-    不管這位長者平常血壓基準是多少，這個數字本身就該被看見，所以獨立於上面
-    「跟自己比」的邏輯之外，用固定門檻檢查每一筆量測，抓到就回報，不用等趨勢。
-    """
+# 紅色等級要求「血壓≥180/120 合併胸痛/呼吸困難/肢體麻木無力/視力改變/說話困難」。
+# 但團隊定義的 9 種 event_type（見 care_intents.json）裡沒有肢體無力、視力改變、
+# 說話困難這幾種中風警示症狀的專屬分類——這是已知缺口，先用 chest_tightness
+# （胸悶/胸痛）跟 help（求助，語意上涵蓋「講不清楚、身體不對勁」等長者講不出
+# 具體症狀但明顯求助的情況）當替代近似值。要更精確，需要團隊擴充 event_type
+# 分類，或另外設計一個獨立的症狀標記機制。
+RED_SYMPTOM_EVENT_TYPES = ("chest_tightness", "help")
+
+BP_CRISIS_SYSTOLIC = 180
+BP_CRISIS_DIASTOLIC = 120
+
+
+def _latest_bp_crisis_reading(cur, elder_id: str, days: int):
+    """回傳最近 N 天內最新一筆血壓≥180/120的量測，沒有則回傳 None。"""
     cur.execute(
         """
         SELECT systolic_bp, diastolic_bp, measured_at
         FROM health_measurements
         WHERE elder_id = %s::uuid
           AND measured_at > NOW() - (%s || ' days')::interval
-          AND (systolic_bp >= 180 OR diastolic_bp >= 120)
+          AND (systolic_bp >= %s OR diastolic_bp >= %s)
         ORDER BY measured_at DESC
         LIMIT 1;
         """,
-        (elder_id, days),
+        (elder_id, days, BP_CRISIS_SYSTOLIC, BP_CRISIS_DIASTOLIC),
     )
-    row = cur.fetchone()
-    if not row:
+    return cur.fetchone()
+
+
+def check_bp_red_alert(cur, elder_id: str, days: int = 3) -> str | None:
+    """
+    紅色「立即處理」：血壓≥180/120，且同一個 N 天窗口內同時出現
+    chest_tightness/help 事件（見上方 RED_SYMPTOM_EVENT_TYPES 說明其為近似值）。
+    符合條件才輸出標準緊急處置指引——這段文字是公開既有的血壓緊急處置共同
+    守則（先休息重新量測、有合併症狀撥打119），不是 AI 生成的醫療判斷，
+    是照抄公開指引內容。
+    """
+    bp_row = _latest_bp_crisis_reading(cur, elder_id, days)
+    if not bp_row:
         return None
-    systolic, diastolic, measured_at = row
-    return (
-        f"{measured_at.strftime('%m/%d %H:%M')} 量測血壓 {systolic}/{diastolic} mmHg，"
-        f"數值落在醫學公開定義的高血壓危象範圍（收縮壓 ≥180 或舒張壓 ≥120）。"
+    systolic, diastolic, measured_at = bp_row
+
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM events
+        WHERE elder_id = %s::uuid
+          AND event_type = ANY(%s)
+          AND created_at > NOW() - (%s || ' days')::interval
+          AND deleted_at IS NULL;
+        """,
+        (elder_id, list(RED_SYMPTOM_EVENT_TYPES), days),
     )
+    symptom_count = cur.fetchone()[0]
+    if symptom_count == 0:
+        return None  # 血壓雖高但沒有合併症狀事件，不到紅色等級，歸類到橘色
+
+    return (
+        f"{measured_at.strftime('%m/%d %H:%M')} 血壓 {systolic}/{diastolic} mmHg"
+        f"（≥180/120），且近期同時出現胸悶/求助類事件。"
+        f"標準處置：若同時有胸痛、呼吸困難、肢體麻木無力、視力改變、說話困難等"
+        f"症狀，請立即撥打119。"
+    )
+
+
+def check_bp_orange_alert(cur, elder_id: str, days: int = 3) -> str | None:
+    """
+    橘色「建議聯絡醫療人員」之一：血壓≥180/120，但沒有合併紅色等級的症狀事件
+    （紅色條件見 check_bp_red_alert）。標準處置：休息後重新量測，仍偏高則
+    儘速聯絡醫療人員——同樣是照抄公開指引，不是 AI 判斷。
+    """
+    bp_row = _latest_bp_crisis_reading(cur, elder_id, days)
+    if not bp_row:
+        return None
+    systolic, diastolic, measured_at = bp_row
+
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM events
+        WHERE elder_id = %s::uuid
+          AND event_type = ANY(%s)
+          AND created_at > NOW() - (%s || ' days')::interval
+          AND deleted_at IS NULL;
+        """,
+        (elder_id, list(RED_SYMPTOM_EVENT_TYPES), days),
+    )
+    symptom_count = cur.fetchone()[0]
+    if symptom_count > 0:
+        return None  # 已經在紅色等級裡回報過，橘色不重複講
+
+    return (
+        f"{measured_at.strftime('%m/%d %H:%M')} 血壓 {systolic}/{diastolic} mmHg（≥180/120）。"
+        f"標準處置：先休息至少1分鐘後重新量測，若再次量測仍偏高，請儘速聯絡醫療人員。"
+    )
+
+
+def analyze_medication_refusal_trend(cur, elder_id: str, days: int = 7) -> str | None:
+    """橘色「經常忘記/拒絕服藥」：比較拒絕服藥事件次數的變化。"""
+    recent, previous = _period_counts(cur, elder_id, ("refuse_medication",), days)
+    if recent == 0:
+        return None
+    if previous == 0:
+        return f"過去 {days} 天出現 {recent} 次拒絕服藥紀錄，前 {days} 天無相關紀錄。"
+    diff = recent - previous
+    if diff <= 0:
+        return None  # 沒有增加就不用特別提
+    return f"過去 {days} 天拒絕服藥 {recent} 次，較前 {days} 天的 {previous} 次增加 {diff} 次。"
+
+
+def check_missing_bp_data(cur, elder_id: str, gap_days: int = 5) -> str | None:
+    """
+    黃色「資料缺漏」：檢查最近一筆血壓量測距今有沒有超過 gap_days 天。
+    這個檢查本身也是規則邏輯（比對日期差），純粹提醒「資料太久沒更新」，
+    不代表長者身體狀況異常，只是資料完整度不足、沒辦法做出可信的趨勢判斷。
+    """
+    cur.execute(
+        """
+        SELECT MAX(measured_at) FROM health_measurements WHERE elder_id = %s::uuid;
+        """,
+        (elder_id,),
+    )
+    last_measured = cur.fetchone()[0]
+    if last_measured is None:
+        return "尚無任何血壓量測紀錄。"
+
+    gap = datetime.now(timezone.utc) - last_measured
+    if gap.days < gap_days:
+        return None
+    return f"最近一筆血壓量測是 {last_measured.strftime('%m/%d')}，已經 {gap.days} 天沒有新的量測資料。"
 
 
 # 語音事件對應的嚴重度，用來決定當天的 overall_status（跟 main.py 產生 events
@@ -251,6 +354,28 @@ def generate_daily_summary(cur, elder_id: str, target_date=None) -> dict:
     }
 
 
+def get_recent_conversation_texts(cur, elder_id: str, days: int = 7, limit: int = 30) -> list[str]:
+    """
+    取出最近 N 天的原始逐字稿（normalized_text 優先，沒有就用 original_text），
+    給 ai_translator.py 的 analyze_conversation_tone() 做語氣/情緒模式的質性
+    觀察用。這裡只負責撈資料，不做任何判斷——判斷是 AI 那層的事，且那層的
+    輸出被嚴格限制只能是「觀察描述」，見 ai_translator.py 檔頭說明。
+    """
+    cur.execute(
+        """
+        SELECT COALESCE(normalized_text, original_text) AS text
+        FROM events
+        WHERE elder_id = %s::uuid
+          AND created_at > NOW() - (%s || ' days')::interval
+          AND deleted_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT %s;
+        """,
+        (elder_id, days, limit),
+    )
+    return [row[0] for row in cur.fetchall() if row[0]]
+
+
 def save_daily_summary(cur, summary: dict) -> None:
     """把 generate_daily_summary() 算好的結果寫進 daily_summaries 表。
     同一位長者同一天只會有一筆（schema 的 UNIQUE(elder_id, summary_date)
@@ -268,29 +393,43 @@ def save_daily_summary(cur, summary: dict) -> None:
 
 def generate_trend_summary(cur, elder_id: str) -> dict:
     """
-    彙整所有趨勢描述，回傳給 API / 每日摘要使用。
-    findings / urgent_findings 都是純資料變化描述的字串陣列，不包含任何
-    「建議就醫」「疑似」等醫療判斷用語——如規格要求，AI 只描述變化，判斷交給
-    家屬/醫療人員。urgent_findings 跟 findings 分開，是因為急症等級數字
-    （check_bp_crisis）跟一般趨勢變化的急迫程度不同，前端可以用不同視覺樣式
-    呈現（例如紅色提示 vs 一般訊息），但兩者都只是「描述」，沒有等級高低的
-    醫療判斷語氣差異。
+    彙整所有趨勢描述成三級分類（紅/橘/黃），回傳給 API / 每日摘要使用。
+    分級邏輯全部是規則比對（次數、平均值、日期差），不叫 AI 判斷：
+
+      🔴 red_findings    —— 血壓≥180/120 且合併胸悶/求助類事件（近似中風警示症狀，
+                            見 RED_SYMPTOM_EVENT_TYPES 說明）。附標準緊急處置指引
+                            （照抄公開守則，非 AI 生成的醫療建議）。
+      🟠 orange_findings —— 血壓≥180/120 但無合併症狀／疼痛不適事件增加／
+                            拒絕服藥次數增加。「經醫師設定值」規格要求的醫囑
+                            門檻，目前用個人基準線（analyze_bp_vs_baseline）
+                            代替，因為資料庫還沒有醫師個別設定值的欄位。
+      🟡 yellow_findings —— 血壓高於個人基準線／近期持續上升／資料缺漏過久。
+
+    三個陣列裡的每一句話都可以回推是哪個數字/門檻比較出來的，沒有一句是模型
+    憑感覺生成的判斷。
     """
-    findings = []
-    for fn in (analyze_pain_trend, analyze_bp_trend, analyze_bp_vs_baseline):
+    red_findings = []
+    result = check_bp_red_alert(cur, elder_id)
+    if result:
+        red_findings.append(result)
+
+    orange_findings = []
+    for fn in (check_bp_orange_alert, analyze_pain_trend, analyze_medication_refusal_trend):
         result = fn(cur, elder_id)
         if result:
-            findings.append(result)
+            orange_findings.append(result)
 
-    urgent_findings = []
-    result = check_bp_crisis(cur, elder_id)
-    if result:
-        urgent_findings.append(result)
+    yellow_findings = []
+    for fn in (analyze_bp_vs_baseline, analyze_bp_trend, check_missing_bp_data):
+        result = fn(cur, elder_id)
+        if result:
+            yellow_findings.append(result)
 
     return {
         "elder_id": elder_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "findings": findings,
-        "urgent_findings": urgent_findings,
-        "has_notable_change": len(findings) > 0 or len(urgent_findings) > 0,
+        "red_findings": red_findings,
+        "orange_findings": orange_findings,
+        "yellow_findings": yellow_findings,
+        "has_notable_change": bool(red_findings or orange_findings or yellow_findings),
     }

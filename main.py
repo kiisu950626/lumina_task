@@ -30,7 +30,7 @@ DetectorFactory.seed = 0 # 確保偵測穩定
 # 辨識成「咖逃呼很痛」），若不修正就直接丟給翻譯模型，翻出來的東西也會跟著錯。
 # ai_translator.py 用 Gemini 把這種亂碼先正規化成語意正確的標準中文再繼續。
 sys.path.append(os.path.join(base_dir, "Taiwan-Tongues-ASR-CE", "api"))
-from ai_translator import get_ai_analysis, polish_trend_summary
+from ai_translator import get_ai_analysis, polish_trend_summary, analyze_conversation_tone
 
 if not os.getenv("GEMINI_API_KEY"):
     print("⚠️ [警告] 未偵測到 GEMINI_API_KEY（應設定於 Taiwan-Tongues-ASR-CE/api/.env），"
@@ -128,7 +128,10 @@ else:
 
 # 模組五：趨勢判斷（純規則統計，不叫 AI，理由見 trend_analysis.py 檔頭說明）
 sys.path.append(os.path.join(base_dir, "Taiwan-Tongues-ASR-CE", "api"))
-from trend_analysis import generate_trend_summary, generate_daily_summary, save_daily_summary
+from trend_analysis import (
+    generate_trend_summary, generate_daily_summary, save_daily_summary,
+    get_recent_conversation_texts,
+)
 
 # 文字轉向量：改用本機模型，取代隊友原本 ai_client.py 呼叫 Gemini 的版本
 # （見 local_embeddings.py 檔頭說明）。模型本身在第一次呼叫時才真的載入，
@@ -489,9 +492,9 @@ async def get_care_records(limit: int = 50, severity_level: str = None):
 
 @app.get("/api/voice/trend/{elder_id}")
 async def get_trend_summary(elder_id: str):
-    """模組五：趨勢判斷。比較過去 7 天跟前 7 天的疼痛事件次數、血壓平均值，
-    只回傳資料變化描述，不含任何醫療判斷/建議字眼（規格要求）。
-    需要 Postgres 才能查（趨勢資料存在 events / health_measurements 表）。"""
+    """模組五：趨勢判斷。三級分類（紅/橘/黃），只回傳資料變化描述，不含任何
+    醫療判斷/建議字眼（規格要求，紅/橘裡引用的緊急處置指引是照抄公開守則，
+    不是 AI 生成的建議）。需要 Postgres 才能查。"""
     if not DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="Postgres 未連線，趨勢判斷需要正式資料庫。")
     try:
@@ -503,16 +506,30 @@ async def get_trend_summary(elder_id: str):
 
     # 把規則邏輯算好的數字描述，額外潤飾成一段給家屬看的自然語句。
     # 判斷本身在上面 generate_trend_summary() 已經算完，這裡只是「講得更順」，
-    # 失敗（額度用盡/連線問題）就不設 narrative，前端改顯示 findings 原始清單，
+    # 失敗（額度用盡/連線問題）就不設 narrative，前端改顯示三個陣列的原始清單，
     # 不會讓整個趨勢查詢因為這一步失敗而掛掉。
     summary["narrative"] = None
     if summary["has_notable_change"]:
         try:
             summary["narrative"] = polish_trend_summary(
-                summary["findings"], summary["urgent_findings"]
+                summary["red_findings"], summary["orange_findings"], summary["yellow_findings"]
             )
         except Exception as e:
             print(f"⚠️ [趨勢摘要潤飾失敗，不影響原始數字描述]: {e}")
+
+    # 額外的 AI 質性觀察：讀長者最近逐字稿，找規則邏輯（純算次數）抓不到的
+    # 語氣/話題模式。刻意獨立於 red/orange/yellow 分級判斷之外——這欄位的
+    # 內容不會、也不能拿去決定分級，只是給家屬多一個參考角度，見
+    # ai_translator.py 的 analyze_conversation_tone() 檔頭說明其安全邊界。
+    summary["conversation_tone_observation"] = None
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                recent_texts = get_recent_conversation_texts(cur, elder_id)
+        if recent_texts:
+            summary["conversation_tone_observation"] = analyze_conversation_tone(recent_texts)
+    except Exception as e:
+        print(f"⚠️ [言談模式觀察失敗，不影響分級判斷]: {e}")
 
     return summary
 
