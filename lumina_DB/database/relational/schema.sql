@@ -9,7 +9,7 @@ DROP TABLE IF EXISTS group_members CASCADE;
 DROP TABLE IF EXISTS care_groups CASCADE;
 DROP TABLE IF EXISTS elders CASCADE;
 DROP TABLE IF EXISTS users CASCADE;
-DROP TABLE IF EXISTS audit_logs CASCADE;
+
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -138,17 +138,21 @@ CREATE TRIGGER update_events_modtime BEFORE UPDATE ON events FOR EACH ROW EXECUT
 
 CREATE TABLE chat_messages (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    group_id        UUID NOT NULL REFERENCES care_groups(id) ON DELETE CASCADE,
     sender_id       UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    receiver_id     UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     elder_id        UUID REFERENCES elders(id) ON DELETE CASCADE,
-    
-    original_text   TEXT NOT NULL,
+  
+    message_type    VARCHAR(20) NOT NULL DEFAULT 'text' CHECK (message_type IN ('text', 'image', 'audio', 'system')),
+
+    content         TEXT NOT NULL,
+
     translated_text TEXT,
-    source_language VARCHAR(10) NOT NULL,
-    target_language VARCHAR(10) NOT NULL,
+    source_language VARCHAR(10),
+    target_language VARCHAR(10),
     
     is_read         BOOLEAN NOT NULL DEFAULT FALSE,
-    sent_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- =========================================================================
@@ -164,6 +168,8 @@ CREATE TABLE health_measurements (
     CONSTRAINT check_bp_logic CHECK (systolic_bp > diastolic_bp), -- 高壓必須大於低壓
     blood_sugar      NUMERIC(5,1) CHECK (blood_sugar > 0),
     meal_context     VARCHAR(20) CHECK (meal_context IN ('before_meal', 'after_meal', 'fasting')),
+    steps           INT CHECK (steps >= 0),     
+    sleep_hours     NUMERIC(4,1) CHECK (sleep_hours >= 0),
 
     data_source      VARCHAR(50) NOT NULL DEFAULT 'manual', --手動輸入還是手錶的
     ai_evaluation    VARCHAR(50),
@@ -264,6 +270,25 @@ FOR EACH ROW
 EXECUTE PROCEDURE cascade_soft_delete_elder();
 
 
+CREATE OR REPLACE FUNCTION cascade_soft_delete_user()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- 當使用者被軟刪除時，把指派給他的未完成任務設為未指派 (NULL)
+    IF NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL THEN
+        UPDATE tasks 
+        SET assigned_to = NULL, updated_at = NOW()
+        WHERE assigned_to = NEW.id AND deleted_at IS NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_cascade_soft_delete_user
+AFTER UPDATE ON users
+FOR EACH ROW
+EXECUTE PROCEDURE cascade_soft_delete_user();
+
+
 -- =========================================================================
 -- 7. Indexes
 -- =========================================================================
@@ -280,9 +305,9 @@ CREATE INDEX IF NOT EXISTS idx_events_reporter_id ON events(reporter_id);
 CREATE INDEX IF NOT EXISTS idx_events_resolved_by ON events(resolved_by);
 CREATE INDEX IF NOT EXISTS idx_events_type_status ON events(event_type, status);
 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
-CREATE INDEX IF NOT EXISTS idx_chat_participants ON chat_messages(sender_id, receiver_id);
+CREATE INDEX IF NOT EXISTS idx_chat_participants ON chat_messages(group_id, sender_id);
+CREATE INDEX IF NOT EXISTS idx_chat_created_at ON chat_messages(created_at);
 CREATE INDEX IF NOT EXISTS idx_chat_elder_id ON chat_messages(elder_id);
-CREATE INDEX IF NOT EXISTS idx_chat_sent_at ON chat_messages(sent_at);
 CREATE INDEX IF NOT EXISTS idx_health_elder_id ON health_measurements(elder_id);
 CREATE INDEX IF NOT EXISTS idx_health_measured_at ON health_measurements(elder_id, measured_at);
 CREATE INDEX IF NOT EXISTS idx_daily_summaries_date ON daily_summaries(summary_date);
